@@ -22,8 +22,8 @@ from pain_researcher.models import (
     Competitor,
     JudgeSignals,
     PainPointCandidate,
-    RedditThread,
     ScoredPitch,
+    Thread,
 )
 
 
@@ -54,7 +54,7 @@ class ResearchState:
     niches: list[str] = field(default_factory=list)
     target_subreddits: list[str] = field(default_factory=list)
 
-    threads: Annotated[list[RedditThread], operator.add] = field(default_factory=list)
+    threads: Annotated[list[Thread], operator.add] = field(default_factory=list)
     raw_candidates: Annotated[list[PainPointCandidate], operator.add] = field(
         default_factory=list
     )

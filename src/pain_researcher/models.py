@@ -19,7 +19,21 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
-class RedditComment(BaseModel):
+class Platform(str, Enum):
+    """Which data source a Thread/Comment/Evidence item came from.
+
+    Adding a 4th source later means adding one value here and one
+    provider — nothing downstream (prefilter, digest builder, scoring)
+    needs to change, since they all operate on the generic Thread/
+    Comment/Evidence shapes below, not per-platform types.
+    """
+
+    REDDIT = "reddit"
+    HACKERNEWS = "hackernews"
+    STACKEXCHANGE = "stackexchange"
+
+
+class Comment(BaseModel):
     id: str
     author: Optional[str] = None
     body: str
@@ -28,30 +42,44 @@ class RedditComment(BaseModel):
     permalink: str
 
 
-class RedditThread(BaseModel):
+class Thread(BaseModel):
+    """A submission/story/question and its top comments/answers, in a
+    shape common across every source provider.
+
+    `community` generalizes "subreddit" to whatever the source's grouping
+    concept is: a subreddit name, the literal string "hackernews" (HN has
+    no sub-communities), or a Stack Exchange site slug like "money".
+    """
+
     id: str
-    subreddit: str
+    platform: Platform
+    community: str
     title: str
-    selftext: str = ""
+    body: str = ""
     author: Optional[str] = None
     score: int = 0
     num_comments: int = 0
     created_utc: float
     permalink: str
-    flair: Optional[str] = None
-    comments: list[RedditComment] = Field(default_factory=list)
+    flair: Optional[str] = None  # Reddit-only; None elsewhere
+    comments: list[Comment] = Field(default_factory=list)
 
 
-class EvidenceSource(str, Enum):
-    REDDIT_THREAD = "reddit_thread"
-    REDDIT_COMMENT = "reddit_comment"
+class ContentKind(str, Enum):
+    """Generic across sources: THREAD = submission/story/question,
+    COMMENT = comment/answer/reply."""
+
+    THREAD = "thread"
+    COMMENT = "comment"
 
 
 class Evidence(BaseModel):
     """One concrete, traceable data point backing a pain-point candidate."""
 
-    source_type: EvidenceSource
-    subreddit: str
+    content_kind: ContentKind
+    platform: Platform
+    community: str
+    thread_id: str
     author: Optional[str] = None
     score: int = 0
     excerpt: str
@@ -83,27 +111,22 @@ class PainPointCandidate(BaseModel):
 
     @property
     def distinct_threads(self) -> set[str]:
-        """Reddit thread IDs referenced by this candidate's evidence.
+        """Distinct thread/story/question IDs referenced by this
+        candidate's evidence.
 
-        Parses the `/r/{sub}/comments/{thread_id}/...` permalink shape
-        rather than string-splitting on a fixed prefix, since a naive
-        split on "/comment" also matches the plural "/comments/" segment
-        and silently collapses distinct threads together.
+        Reads `Evidence.thread_id` directly rather than parsing it back
+        out of a permalink URL — thread grouping is known at the moment
+        each Evidence is constructed (the provider/digest-builder already
+        has the parent thread's id in hand), and every source shapes its
+        URLs differently (Reddit's `/comments/{id}/`, HN's flat
+        `item?id=`, Stack Exchange's `/questions/{id}/`), so deriving it
+        from the URL string would need one fragile parser per platform.
         """
-        threads: set[str] = set()
-        for e in self.evidence:
-            parts = [p for p in e.permalink.split("/") if p]
-            if "comments" in parts:
-                idx = parts.index("comments")
-                if idx + 1 < len(parts):
-                    threads.add(parts[idx + 1])
-                    continue
-            threads.add(e.permalink)
-        return threads
+        return {e.thread_id for e in self.evidence}
 
     @property
-    def subreddits(self) -> set[str]:
-        return {e.subreddit for e in self.evidence}
+    def communities(self) -> set[str]:
+        return {e.community for e in self.evidence}
 
     @property
     def total_engagement(self) -> int:
