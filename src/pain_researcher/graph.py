@@ -42,6 +42,7 @@ from pain_researcher.models import (
     Evidence,
     JudgeSignals,
     PainPointCandidate,
+    Platform,
     Thread,
 )
 from pain_researcher.prefilter import Prefilter, gate_candidates
@@ -51,6 +52,7 @@ from pain_researcher.prompts import (
     JUDGE_PROMPT,
     NICHE_PROPOSAL_PROMPT,
     SUBREDDIT_PROPOSAL_PROMPT,
+    WEB_RESEARCH_REFLECTION_PROMPT,
     get_current_date,
 )
 from pain_researcher.providers.crawl import CrawlProvider
@@ -325,6 +327,108 @@ def select_targets(state: ResearchState, config: RunnableConfig) -> dict:
     return {"niches": niches, "target_subreddits": verified, "usage_log": usage}
 
 
+def _run_web_research(niche: str, settings, providers: "Providers") -> tuple[list[Thread], list[UsageRecord]]:
+    """Iterative general web search -> crawl -> reflect -> next-query loop.
+
+    Unlike the other three sources, this one has no structured target
+    list to fetch from — each cycle decides where to look next based on
+    what's already been found, using `web_search.decision_role` (judge
+    by default: assessing evidence quality and spotting gaps is real
+    judgment, not bulk extraction, matching the cheap/judge split used
+    everywhere else in this pipeline).
+
+    Crawled pages become `Thread` objects like any other source, with
+    `platform=WEBSEARCH` — they flow through the exact same extract/
+    cluster/gate pipeline afterward. No separate extraction path here;
+    scoring.py is what actually discounts this source's lack of real
+    engagement metrics (see `websearch_trust_discount`).
+    """
+    import hashlib
+
+    wcfg = settings.web_search
+    usage: list[UsageRecord] = []
+    seen_urls: set[str] = set()
+    threads: list[Thread] = []
+    past_queries: list[str] = []
+    findings: list[str] = []
+
+    query = niche
+    for cycle in range(1, wcfg.max_cycles + 1):
+        print(f"[websearch] cycle {cycle}/{wcfg.max_cycles}: searching {query!r}...")
+        past_queries.append(query)
+
+        search_results = _run_with_timeout(
+            lambda q=query: duckduckgo_search(q, max_results=wcfg.pages_per_search, fetch_full_page=False),
+            timeout_s=20,
+            default={"results": []},
+        )
+        new_urls = [
+            r["url"]
+            for r in search_results.get("results", [])
+            if r.get("url") and r["url"] not in seen_urls
+        ]
+        seen_urls.update(new_urls)
+
+        pages = (
+            _run_with_timeout(
+                lambda u=new_urls: providers.crawl.fetch_pages(u, limit=wcfg.pages_per_search),
+                timeout_s=60,
+                default=[],
+            )
+            if new_urls
+            else []
+        )
+        print(
+            f"[websearch] cycle {cycle}/{wcfg.max_cycles}: {len(new_urls)} new link(s), "
+            f"{len(pages)} page(s) crawled"
+        )
+
+        for page in pages:
+            domain = page.url.split("//")[-1].split("/")[0].lower()
+            body = page.markdown[: wcfg.max_chars_per_page]
+            threads.append(
+                Thread(
+                    id=hashlib.sha256(page.url.encode()).hexdigest()[:12],
+                    platform=Platform.WEBSEARCH,
+                    community=domain,
+                    title=page.title or page.url,
+                    body=body,
+                    author=None,
+                    score=0,
+                    num_comments=0,
+                    created_utc=time.time(),
+                    permalink=page.url,
+                    comments=[],
+                )
+            )
+            findings.append(f"- {page.title or domain}: {body[:200]}")
+
+        if cycle == wcfg.max_cycles:
+            break  # last cycle: no need to spend a reflection call deciding a next query
+
+        findings_digest = "\n".join(findings[-10:]) or "Nothing found yet."
+        prompt = WEB_RESEARCH_REFLECTION_PROMPT.format(
+            niche=niche,
+            past_queries="\n".join(f"- {q}" for q in past_queries),
+            findings_digest=findings_digest,
+        )
+        try:
+            result = providers.llm.generate_structured(
+                wcfg.decision_role, "web_research_reflect", "", prompt
+            )
+            usage.append(result.usage)
+            next_query = (result.data.get("next_query") or "").strip()
+            print(f"[websearch] cycle {cycle}/{wcfg.max_cycles} gap: {result.data.get('gap_analysis', '')[:150]}")
+        except Exception as e:
+            print(f"[websearch] reflection failed, broadening query instead: {e}")
+            next_query = ""
+
+        query = next_query or f"{niche} complaints frustration workaround"
+
+    print(f"[websearch] done: {len(threads)} page(s) collected across {wcfg.max_cycles} cycle(s)")
+    return threads, usage
+
+
 def harvest_threads(state: ResearchState, config: RunnableConfig) -> dict:
     """Pull from every enabled source, then deterministic prefilter —
     no LLM involved yet.
@@ -339,6 +443,7 @@ def harvest_threads(state: ResearchState, config: RunnableConfig) -> dict:
     prefilter = Prefilter(settings.prefilter)
 
     all_threads: list[Thread] = []
+    usage: list[UsageRecord] = []
     # Each per-source call is individually timeout-bounded, not just via
     # the http client's own timeout setting — confirmed live that a
     # library-level timeout can fail to fire on some networks (proxy/AV
@@ -400,9 +505,25 @@ def harvest_threads(state: ResearchState, config: RunnableConfig) -> dict:
                 print(f"[harvest] stackexchange/{site}: {len(found)} threads")
                 all_threads.extend(found)
 
+    if "websearch" in settings.sources.enabled:
+        niche = (
+            (state.niches[0] if state.niches else None)
+            or state.seed_niche
+            or settings.web_search.fallback_seed_query
+        )
+        if niche:
+            web_threads, web_usage = _run_web_research(niche, settings, providers)
+            all_threads.extend(web_threads)
+            usage.extend(web_usage)
+        else:
+            print(
+                "[websearch] skipped: no niche available (not in seed/autonomous mode, and "
+                "web_search.fallback_seed_query isn't set in settings.yaml)"
+            )
+
     kept = prefilter.filter_threads(all_threads)
     print(f"[harvest] total harvested: {len(all_threads)}, survived prefilter: {len(kept)}")
-    return {"threads": kept}
+    return {"threads": kept, "usage_log": usage}
 
 
 def extract_pain_points(state: ResearchState, config: RunnableConfig) -> dict:
@@ -901,7 +1022,14 @@ if __name__ == "__main__":
     # appear until the process exited. Forcing line-buffering means the
     # `[harvest]`/`[extract]`/etc. progress lines show up as they happen
     # regardless of how this is run, not just in an interactive terminal.
-    sys.stdout.reconfigure(line_buffering=True)
+    #
+    # encoding="utf-8", errors="replace" is separately load-bearing now
+    # that web_search crawls arbitrary, potentially non-English pages —
+    # confirmed live: Windows' console defaults to cp1252, which crashed
+    # outright trying to print a Vietnamese page title. Every print() in
+    # this program touches content that ultimately comes from the open
+    # web, so this needs to be crash-proof everywhere, not just here.
+    sys.stdout.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
 
     result = run_with_checkpoint(ResearchStateInput())
     print(f"Run complete: {len(result.get('ranked_pitches', []))} ranked pitches.")
