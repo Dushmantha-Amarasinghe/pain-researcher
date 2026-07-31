@@ -12,7 +12,10 @@ models:
     tpm_limit: 16000
     rpd_limit: 14400
     context_window: 128000
-    max_input_tokens_per_call: 1600   # hard cap per call, must stay below tpm_limit
+    max_input_tokens_per_call: 6000   # hard cap per call, must stay below tpm_limit — raised from
+                                       # 1600 after a real batch of just 2 threads measured ~2517
+                                       # tokens; the old cap was silently failing every real
+                                       # extraction call via ContentTooLargeError
     safety_margin_pct: 85             # only ever plan to use this % of stated limits
     target_rpm: 10                    # sustained pacing target, not a burst ceiling
     supports_tool_calling: false      # flip when the model supports it — no code change
@@ -24,7 +27,7 @@ models:
     tpm_limit: 16000
     rpd_limit: 14400
     context_window: 128000
-    max_input_tokens_per_call: 1600
+    max_input_tokens_per_call: 6000   # same fix as gemma-4-26b above
     safety_margin_pct: 85
     target_rpm: 8
     supports_tool_calling: false
@@ -52,17 +55,25 @@ sources:
   # here (e.g. while API access is pending approval) without touching
   # any other config — hackernews and stackexchange need no credentials
   # at all and work immediately.
-  enabled: ["hackernews", "stackexchange"]  # add "reddit" back once API access is approved
+  enabled: ["hackernews"]  # add "stackexchange" back once its temporary IP rate-limit clears, "reddit" once approved
   # Stack Exchange is multi-tenant (~170 sites); pick the ones relevant
   # to the niches you're researching. Site slugs, not full URLs — e.g.
   # "money" for money.stackexchange.com, "stackoverflow" for Stack Overflow.
-  stackexchange_sites: ["money", "webmasters", "sysadmin", "superuser", "freelancing"]
+  stackexchange_sites: ["money", "webmasters", "serverfault", "superuser", "freelancing", "workplace"]
+  # Blind "top by activity" browsing rarely surfaces complaint-shaped
+  # content (confirmed live) — search for a phrase instead. Kept short:
+  # queries × sites multiplies request volume fast against SE's
+  # unauthenticated daily quota.
+  harvest_queries: ["is there a tool", "recommend a tool", "so frustrating", "any recommendations for"]
+  max_results_per_query: 15
 
 content_budget:
   max_threads_per_subreddit: 25
   max_comments_per_thread: 15
   max_chars_per_comment: 600
-  max_threads_per_extraction_call: 5  # threads bundled into one 26B extraction call
+  max_threads_per_extraction_call: 3  # threads bundled into one 26B extraction call — lowered
+                                       # from 5 alongside the max_input_tokens_per_call fix above,
+                                       # for margin against threads with unusually long bodies
   max_sources_per_call: 3
   max_chars_per_source: 4000
   max_competitor_pages: 5
