@@ -1,16 +1,17 @@
-"""Crawl4AI wrapper — competitor discovery only.
+"""Crawl4AI wrapper — page fetching for pages with no clean API.
 
-Scoped deliberately narrow: Reddit data always comes from PRAW
-(`reddit.py`), never scraped. Crawl4AI is used only here, for pages that
-have no clean API — product landing pages, review-site listings,
-Product Hunt / Indie Hackers threads surfaced by a web search — to check
-whether a candidate pain point already has a solution on the market.
+Reddit/HN/Stack Exchange data always comes from their official APIs
+(never scraped). Crawl4AI is used for pages that have no API at all:
+competitor-scan's product landing pages and review sites, and the
+web-research cycle's general search results (Indie Hackers threads,
+niche blogs, forum posts).
 """
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Optional
 
 from pain_researcher.config import ContentBudgetConfig
 
@@ -41,8 +42,14 @@ class CrawlProvider:
     def __init__(self, content_budget: ContentBudgetConfig):
         self._content_budget = content_budget
 
-    def fetch_pages(self, urls: list[str]) -> list[CompetitorPage]:
-        """Fetch and markdown-ify up to `max_competitor_pages` URLs.
+    def fetch_pages(self, urls: list[str], limit: Optional[int] = None) -> list[CompetitorPage]:
+        """Fetch and markdown-ify up to `limit` URLs (default
+        `max_competitor_pages`, this provider's original caller).
+
+        `limit` exists so other callers (e.g. the web-research cycle,
+        which has its own `pages_per_search` config) aren't silently
+        capped by a competitor-scan-specific setting that has nothing to
+        do with their own request size.
 
         Runs Crawl4AI's async crawler synchronously via `asyncio.run` —
         the rest of this pipeline is sync (matching the LangGraph node
@@ -50,7 +57,8 @@ class CrawlProvider:
         enough (only for shortlisted candidates, capped per candidate)
         that per-call event-loop overhead doesn't matter.
         """
-        capped = urls[: self._content_budget.max_competitor_pages]
+        effective_limit = limit if limit is not None else self._content_budget.max_competitor_pages
+        capped = urls[:effective_limit]
         if not capped:
             return []
         return asyncio.run(self._fetch_pages_async(capped))
