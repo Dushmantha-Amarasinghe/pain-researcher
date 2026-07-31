@@ -203,6 +203,12 @@ You are researching real, recurring, monetizable problems in this niche:
 3. Write ONE concrete, specific search query that closes that gap. It must be meaningfully different from every query already run above — do not repeat or lightly rephrase one of them.
 </GOAL>
 
+<QUERY FORMAT — IMPORTANT>
+The search engine behind this is a plain keyword search, not a full search-operator query language. Confirmed live: queries using `site:`, quoted phrases combined with `OR`/`AND`, or nested parentheses reliably return zero results, even when a simpler version of the same query would work.
+- Write the query the way a person would type it into a search box: 3-7 plain words, no operators, no quotes, no boolean logic, no `site:` restriction.
+- Make it *specific* through word choice, not through search syntax — e.g. "freelancers late invoice payment tracking" rather than `site:reddit.com ("freelancer") ("invoice" OR "billing") ("late" OR "overdue")`.
+</QUERY FORMAT>
+
 <FORMAT>
 {{
   "gap_analysis": "what's missing, unconfirmed, or worth checking next, in your own words",
