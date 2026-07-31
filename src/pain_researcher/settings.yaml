@@ -55,7 +55,7 @@ sources:
   # here (e.g. while API access is pending approval) without touching
   # any other config — hackernews and stackexchange need no credentials
   # at all and work immediately.
-  enabled: ["hackernews"]  # add "stackexchange" back once its temporary IP rate-limit clears, "reddit" once approved
+  enabled: ["hackernews","websearch"]  # add "stackexchange" back once its temporary IP rate-limit clears, "reddit" once approved
   # Stack Exchange is multi-tenant (~170 sites); pick the ones relevant
   # to the niches you're researching. Site slugs, not full URLs — e.g.
   # "money" for money.stackexchange.com, "stackoverflow" for Stack Overflow.
@@ -64,8 +64,14 @@ sources:
   # content (confirmed live) — search for a phrase instead. Kept short:
   # queries × sites multiplies request volume fast against SE's
   # unauthenticated daily quota.
-  harvest_queries: ["is there a tool", "recommend a tool", "so frustrating", "any recommendations for"]
-  max_results_per_query: 15
+  # HN has no rate limit (unlike Stack Exchange), so pushing volume up
+  # here is low-risk — the real cost is time: each thread needs its own
+  # sequential comment-fetch call, and every extraction batch is a slow,
+  # reasoning-heavy LLM call. This set is roughly 2x the original volume
+  # (4 queries x 15 -> 6 x 20); push higher once you've seen how long
+  # that actually takes end to end on your machine.
+  harvest_queries: ["is there a tool", "recommend a tool", "so frustrating", "any recommendations for", "i wish there was", "sick of doing this manually"]
+  max_results_per_query: 20
 
 # General web search + crawl — reaches sites with no API at all (Indie
 # Hackers, niche blogs, review sites). Opt in by adding "websearch" to
@@ -78,15 +84,15 @@ web_search:
   pages_per_search: 5        # pages crawled per cycle; 8 cycles x 5 = up to 40 page loads per run
   max_chars_per_page: 3000
   decision_role: judge      # "what to search next" is real judgment -> stronger model by default
-  fallback_seed_query: null # used only if no niche is available (e.g. watchlist mode with no niche)
+  fallback_seed_query: "freelance invoicing pain points" # used only if no niche is available (e.g. watchlist mode with no niche)
 
 content_budget:
   max_threads_per_subreddit: 25
   max_comments_per_thread: 15
   max_chars_per_comment: 600
-  max_threads_per_extraction_call: 3  # threads bundled into one 26B extraction call — lowered
-                                       # from 5 alongside the max_input_tokens_per_call fix above,
-                                       # for margin against threads with unusually long bodies
+  max_threads_per_extraction_call: 4  # threads bundled into one 26B extraction call — 3 was overly
+                                       # conservative once max_input_tokens_per_call was raised to
+                                       # 6000; 4 still leaves margin against unusually long bodies
   max_sources_per_call: 3
   max_chars_per_source: 4000
   max_competitor_pages: 5
