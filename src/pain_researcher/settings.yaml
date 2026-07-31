@@ -52,7 +52,7 @@ sources:
   # here (e.g. while API access is pending approval) without touching
   # any other config — hackernews and stackexchange need no credentials
   # at all and work immediately.
-  enabled: ["reddit", "hackernews", "stackexchange"]
+  enabled: ["hackernews", "stackexchange"]  # add "reddit" back once API access is approved
   # Stack Exchange is multi-tenant (~170 sites); pick the ones relevant
   # to the niches you're researching. Site slugs, not full URLs — e.g.
   # "money" for money.stackexchange.com, "stackoverflow" for Stack Overflow.
