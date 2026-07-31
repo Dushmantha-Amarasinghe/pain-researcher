@@ -59,6 +59,31 @@ class LLMCallResult:
     raw_text: str
 
 
+def _extract_response_text(content: Any) -> str:
+    """Pull the actual answer text out of a LangChain message's `.content`.
+
+    Most models return a plain string. Gemma 4 is a reasoning model and
+    returns a *list* of typed content blocks instead — confirmed live:
+    `[{'type': 'thinking', 'thinking': '...'}, ..., {'type': 'text',
+    'text': '...'}]`, with the bulk of the response's output tokens spent
+    on the thinking blocks (one real call: 345 of 360 output tokens).
+    Blindly stringifying that list previously grabbed the first `{...}`
+    in the thinking block's Python-repr — which uses single quotes and
+    isn't valid JSON — instead of the real answer.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    return str(content)
+
+
 def _salvage_json(text: str) -> dict[str, Any]:
     """Extract a JSON object from a model response that may include
     preamble, markdown fences, or trailing commentary.
@@ -187,9 +212,9 @@ class LLMRouter:
             if not getattr(result, "tool_calls", None):
                 raise LLMParseError(f"[{node_name}] model returned no tool call for {tool_class}")
             data = result.tool_calls[0]["args"]
-            return LLMCallResult(data=data, usage=usage, raw_text=str(result.content))
+            return LLMCallResult(data=data, usage=usage, raw_text=_extract_response_text(result.content))
 
-        raw_text = result.content if isinstance(result.content, str) else str(result.content)
+        raw_text = _extract_response_text(result.content)
         data = _salvage_json(raw_text)
         return LLMCallResult(data=data, usage=usage, raw_text=raw_text)
 
