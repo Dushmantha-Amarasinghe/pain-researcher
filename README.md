@@ -11,13 +11,28 @@ LangGraph/LangGraph-Studio scaffolding, but the research pipeline itself
 is a different shape: a funnel with fan-out validation, not a single
 linear research loop. See [Architecture](#architecture) below.
 
+## Data sources
+
+Three sources, each toggleable independently in `settings.yaml`'s
+`sources.enabled` — useful since Reddit API access can be pending
+approval for reasons outside this project's control, while the other
+two need zero credentials and work immediately:
+
+| Source | Access | Credentials |
+|---|---|---|
+| Reddit | Official API (PRAW) | Required if enabled |
+| Hacker News | Algolia Search API | None — free, keyless |
+| Stack Exchange (~170 sites) | Official API | Optional (raises quota) |
+
 ## What it does
 
 1. **Discover** — finds candidate subreddits, either autonomously, from a
-   seed niche, or from a fixed watchlist you provide
-2. **Harvest** — pulls threads via Reddit's official API (PRAW), then
-   filters deterministically (upvotes, age, complaint-language match)
-   before any LLM ever sees the text
+   seed niche, or from a fixed watchlist you provide (Reddit only —
+   Hacker News has no sub-communities to discover, Stack Exchange sites
+   are a fixed list in `settings.yaml`)
+2. **Harvest** — pulls threads from every enabled source, then filters
+   deterministically (upvotes, age, complaint-language match) before any
+   LLM ever sees the text
 3. **Extract & cluster** — an LLM pulls candidate pain points out of the
    surviving threads and merges duplicates reported across different
    threads into single candidates
@@ -94,6 +109,8 @@ select_targets → harvest_threads → extract_pain_points
 | [`quota.py`](src/pain_researcher/quota.py) | Per-model rate limiting/pacing — the binding constraint is tokens/minute, not requests/minute |
 | [`providers/llm.py`](src/pain_researcher/providers/llm.py) | Gemma router: role → model, quota-checked, defensive JSON parsing |
 | [`providers/reddit.py`](src/pain_researcher/providers/reddit.py) | PRAW wrapper — official API, not scraping |
+| [`providers/hackernews.py`](src/pain_researcher/providers/hackernews.py) | Algolia HN Search API — free, keyless |
+| [`providers/stackexchange.py`](src/pain_researcher/providers/stackexchange.py) | Official API across ~170 Stack Exchange sites |
 | [`providers/crawl.py`](src/pain_researcher/providers/crawl.py) | Crawl4AI, scoped to competitor-page discovery only |
 | [`prefilter.py`](src/pain_researcher/prefilter.py) | Deterministic pre-LLM filtering — the biggest token saver in the pipeline |
 | [`scoring.py`](src/pain_researcher/scoring.py) | Deterministic, weighted scoring from LLM-emitted signals |
