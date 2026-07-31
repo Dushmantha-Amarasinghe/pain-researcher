@@ -35,11 +35,11 @@ from pain_researcher.export import export_run, export_usage_report
 from pain_researcher.models import (
     Competitor,
     CompetitorStrength,
+    ContentKind,
     Evidence,
-    EvidenceSource,
     JudgeSignals,
     PainPointCandidate,
-    RedditThread,
+    Thread,
 )
 from pain_researcher.prefilter import Prefilter, gate_candidates
 from pain_researcher.prompts import (
@@ -51,8 +51,10 @@ from pain_researcher.prompts import (
     get_current_date,
 )
 from pain_researcher.providers.crawl import CrawlProvider
+from pain_researcher.providers.hackernews import HackerNewsProvider
 from pain_researcher.providers.llm import ContentTooLargeError, LLMParseError, LLMRouter
 from pain_researcher.providers.reddit import RedditProvider
+from pain_researcher.providers.stackexchange import StackExchangeProvider
 from pain_researcher.scoring import build_scored_pitch, rank_pitches
 from pain_researcher.state import (
     CandidateValidationOutput,
@@ -76,8 +78,10 @@ from pain_researcher.state import (
 @dataclass
 class Providers:
     llm: LLMRouter
-    reddit: RedditProvider
     crawl: CrawlProvider
+    reddit: Optional[RedditProvider]
+    hackernews: Optional[HackerNewsProvider]
+    stackexchange: Optional[StackExchangeProvider]
 
 
 @lru_cache(maxsize=4)
@@ -85,10 +89,31 @@ def _build_providers(settings_path: str) -> Providers:
     settings = get_settings(settings_path or None)
     credentials = Credentials.from_env()
     runtime = RuntimeConfig(settings=settings, options=RunOptions())
+    enabled = settings.sources.enabled
+
+    reddit = None
+    if "reddit" in enabled:
+        if not credentials.has_reddit():
+            raise RuntimeError(
+                "sources.enabled includes 'reddit' but REDDIT_CLIENT_ID/SECRET/USER_AGENT "
+                "aren't set. Either fill those in .env, or remove 'reddit' from "
+                "sources.enabled in settings.yaml to run on hackernews/stackexchange only."
+            )
+        reddit = RedditProvider(credentials, settings.content_budget, settings.discovery)
+
+    hackernews = HackerNewsProvider(settings.content_budget) if "hackernews" in enabled else None
+    stackexchange = (
+        StackExchangeProvider(settings.content_budget, credentials.stackexchange_api_key)
+        if "stackexchange" in enabled
+        else None
+    )
+
     return Providers(
         llm=LLMRouter(runtime, credentials),
-        reddit=RedditProvider(credentials, settings.content_budget, settings.discovery),
         crawl=CrawlProvider(settings.content_budget),
+        reddit=reddit,
+        hackernews=hackernews,
+        stackexchange=stackexchange,
     )
 
 
@@ -104,17 +129,31 @@ def get_providers(options: RunOptions) -> Providers:
 # --------------------------------------------------------------------------
 
 
-def _digest_threads(threads: list[RedditThread]) -> tuple[str, dict[str, Evidence]]:
+def _digest_threads(threads: list[Thread]) -> tuple[str, dict[str, Evidence]]:
+    """Labels threads/comments generically across sources — `{platform}/
+    {community}` instead of Reddit's `r/{subreddit}` — so a batch mixing
+    Reddit, HN, and Stack Exchange content reads sensibly to the LLM.
+
+    Comment-level Evidence uses `thread_id=t.id` (the *parent* thread's
+    id), not the comment's own id — distinct-thread counting depends on
+    grouping every comment under its actual parent, not counting each
+    comment as its own thread.
+    """
     lines: list[str] = []
     index: dict[str, Evidence] = {}
     for i, t in enumerate(threads, start=1):
         label = f"T{i}"
-        lines.append(f"[{label}] r/{t.subreddit} (score {t.score}, {t.num_comments} comments): {t.title}")
-        if t.selftext:
-            lines.append(f"  body: {t.selftext[:500]}")
+        lines.append(
+            f"[{label}] {t.platform.value}/{t.community} "
+            f"(score {t.score}, {t.num_comments} comments): {t.title}"
+        )
+        if t.body:
+            lines.append(f"  body: {t.body[:500]}")
         index[label] = Evidence(
-            source_type=EvidenceSource.REDDIT_THREAD,
-            subreddit=t.subreddit,
+            content_kind=ContentKind.THREAD,
+            platform=t.platform,
+            community=t.community,
+            thread_id=t.id,
             author=t.author,
             score=t.score,
             excerpt=t.title,
@@ -125,8 +164,10 @@ def _digest_threads(threads: list[RedditThread]) -> tuple[str, dict[str, Evidenc
             clabel = f"{label}_C{j}"
             lines.append(f"  [{clabel}] (score {c.score}): {c.body}")
             index[clabel] = Evidence(
-                source_type=EvidenceSource.REDDIT_COMMENT,
-                subreddit=t.subreddit,
+                content_kind=ContentKind.COMMENT,
+                platform=t.platform,
+                community=t.community,
+                thread_id=t.id,
                 author=c.author,
                 score=c.score,
                 excerpt=c.body,
@@ -176,6 +217,14 @@ def select_targets(state: ResearchState, config: RunnableConfig) -> dict:
     """
     options = RunOptions.from_runnable_config(config)
     settings = get_settings(options.settings_path)
+
+    if "reddit" not in settings.sources.enabled:
+        # Reddit-specific subreddit discovery has nothing to do if Reddit
+        # isn't an active source this run (e.g. access still pending
+        # approval) — hackernews/stackexchange need no per-run target
+        # selection, so this node is a no-op for them.
+        return {"niches": [], "target_subreddits": [], "usage_log": []}
+
     providers = get_providers(options)
 
     mode = options.discovery_mode or state.discovery_mode or settings.discovery.mode
@@ -254,7 +303,8 @@ def select_targets(state: ResearchState, config: RunnableConfig) -> dict:
 
 
 def harvest_threads(state: ResearchState, config: RunnableConfig) -> dict:
-    """PRAW pull + deterministic prefilter — no LLM involved yet.
+    """Pull from every enabled source, then deterministic prefilter —
+    no LLM involved yet.
 
     Filtering happens in this same node (not a separate step) so
     `state.threads` never holds anything the extraction node would waste
@@ -265,12 +315,27 @@ def harvest_threads(state: ResearchState, config: RunnableConfig) -> dict:
     providers = get_providers(options)
     prefilter = Prefilter(settings.prefilter)
 
-    all_threads: list[RedditThread] = []
-    for sub in state.target_subreddits:
+    all_threads: list[Thread] = []
+
+    if providers.reddit is not None:
+        for sub in state.target_subreddits:
+            try:
+                all_threads.extend(providers.reddit.fetch_threads(sub))
+            except Exception:
+                continue  # one bad subreddit shouldn't abort harvesting the rest
+
+    if providers.hackernews is not None:
         try:
-            all_threads.extend(providers.reddit.fetch_threads(sub))
+            all_threads.extend(providers.hackernews.fetch_ask_hn())
         except Exception:
-            continue  # one bad subreddit shouldn't abort harvesting the rest
+            pass  # HN being briefly unreachable shouldn't abort the whole harvest
+
+    if providers.stackexchange is not None:
+        for site in settings.sources.stackexchange_sites:
+            try:
+                all_threads.extend(providers.stackexchange.fetch_questions(site))
+            except Exception:
+                continue  # one bad site shouldn't abort harvesting the rest
 
     return {"threads": prefilter.filter_threads(all_threads)}
 
@@ -423,10 +488,11 @@ def export_results(state: ResearchState, config: RunnableConfig) -> dict:
 
 
 def corroborate(state: CandidateValidationState, config: RunnableConfig) -> dict:
-    """Search Reddit for more instances of this pain point beyond the
-    initially harvested set, to strengthen the distinct-author count.
+    """Search every enabled source for more instances of this pain point
+    beyond the initially harvested set, to strengthen the distinct-author
+    count.
 
-    Deliberately LLM-free: PRAW's search is keyword-based and the
+    Deliberately LLM-free: every source's search is keyword-based and the
     candidate's own title is already a reasonable query, so spending an
     LLM call to craft one isn't worth the tokens.
     """
@@ -438,24 +504,40 @@ def corroborate(state: CandidateValidationState, config: RunnableConfig) -> dict
     providers = get_providers(options)
     prefilter = Prefilter(settings.prefilter)
     candidate = state.candidate
+    limit = settings.content_budget.max_threads_per_subreddit
 
-    try:
-        extra_threads = providers.reddit.search_threads(
-            candidate.title, limit=settings.content_budget.max_threads_per_subreddit
-        )
-    except Exception:
-        extra_threads = []
+    extra_threads: list[Thread] = []
+    if providers.reddit is not None:
+        try:
+            extra_threads.extend(providers.reddit.search_threads(candidate.title, limit=limit))
+        except Exception:
+            pass
+    if providers.hackernews is not None:
+        try:
+            extra_threads.extend(providers.hackernews.search(candidate.title, limit=limit))
+        except Exception:
+            pass
+    if providers.stackexchange is not None:
+        for site in settings.sources.stackexchange_sites:
+            try:
+                extra_threads.extend(
+                    providers.stackexchange.search(candidate.title, site=site, limit=limit)
+                )
+            except Exception:
+                continue
 
     existing = {e.permalink for e in candidate.evidence}
     new_evidence: list[Evidence] = []
     for t in extra_threads:
         if (t.permalink not in existing) and (
-            prefilter.matches_complaint(t.title) or prefilter.matches_complaint(t.selftext)
+            prefilter.matches_complaint(t.title) or prefilter.matches_complaint(t.body)
         ):
             new_evidence.append(
                 Evidence(
-                    source_type=EvidenceSource.REDDIT_THREAD,
-                    subreddit=t.subreddit,
+                    content_kind=ContentKind.THREAD,
+                    platform=t.platform,
+                    community=t.community,
+                    thread_id=t.id,
                     author=t.author,
                     score=t.score,
                     excerpt=t.title,
@@ -467,8 +549,10 @@ def corroborate(state: CandidateValidationState, config: RunnableConfig) -> dict
             if c.permalink not in existing and prefilter.matches_complaint(c.body):
                 new_evidence.append(
                     Evidence(
-                        source_type=EvidenceSource.REDDIT_COMMENT,
-                        subreddit=t.subreddit,
+                        content_kind=ContentKind.COMMENT,
+                        platform=t.platform,
+                        community=t.community,
+                        thread_id=t.id,
                         author=c.author,
                         score=c.score,
                         excerpt=c.body,
@@ -534,7 +618,7 @@ def judge(state: CandidateValidationState, config: RunnableConfig) -> dict:
     candidate = state.candidate
 
     evidence_digest = "\n".join(
-        f'- (u/{e.author or "unknown"}, {e.score} pts, r/{e.subreddit}): "{e.excerpt}"'
+        f'- ({e.author or "unknown"} on {e.platform.value}/{e.community}, {e.score} pts): "{e.excerpt}"'
         for e in candidate.evidence[:25]
     ) or "No evidence excerpts available."
     competitor_digest = (
