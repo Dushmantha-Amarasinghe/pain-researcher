@@ -6,7 +6,7 @@ from typing import Dict, Any, List, Union, Optional
 from markdownify import markdownify
 from langsmith import traceable
 from tavily import TavilyClient
-from duckduckgo_search import DDGS
+from ddgs import DDGS  # renamed from duckduckgo_search; old package stopped returning results
 
 from langchain_community.utilities import SearxSearchWrapper
 
