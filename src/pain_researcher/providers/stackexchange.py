@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from typing import Any, Optional
 
 import httpx
@@ -36,6 +37,12 @@ class StackExchangeProvider:
         self._content_budget = content_budget
         self._api_key = api_key
         self._client = httpx.Client(base_url=BASE_URL, timeout=10.0)
+        # Unauthenticated SE traffic hits a burst-rate 429 well before the
+        # 300/day quota is anywhere near exhausted — confirmed live by
+        # firing requests with zero delay. A small fixed pace between
+        # calls, plus one retry on 429, is enough to avoid it in practice.
+        self._min_interval = 0.15
+        self._last_request_at = 0.0
 
     def _params(self, **kwargs: Any) -> dict[str, Any]:
         params = {"filter": "withbody", **kwargs}
@@ -43,16 +50,28 @@ class StackExchangeProvider:
             params["key"] = self._api_key
         return params
 
+    def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        wait = self._min_interval - (time.monotonic() - self._last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        resp = self._client.get(path, params=params)
+        self._last_request_at = time.monotonic()
+        if resp.status_code == 429:
+            time.sleep(2.0)
+            resp = self._client.get(path, params=params)
+            self._last_request_at = time.monotonic()
+        resp.raise_for_status()
+        return resp.json()
+
     def fetch_questions(self, site: str, limit: Optional[int] = None) -> list[Thread]:
         """Pull recently-active questions from one Stack Exchange site."""
         limit = limit or self._content_budget.max_threads_per_subreddit
         try:
-            resp = self._client.get(
+            data = self._get(
                 "/questions",
-                params=self._params(site=site, pagesize=limit, order="desc", sort="activity"),
+                self._params(site=site, pagesize=limit, order="desc", sort="activity"),
             )
-            resp.raise_for_status()
-            items = resp.json().get("items", [])
+            items = data.get("items", [])
         except Exception as e:
             print(f"Warning: Stack Exchange fetch_questions failed for {site}: {e}")
             return []
@@ -61,12 +80,10 @@ class StackExchangeProvider:
     def search(self, query: str, site: str, limit: int = 25) -> list[Thread]:
         """Full-text search on one site — used by the corroborate step."""
         try:
-            resp = self._client.get(
-                "/search/advanced",
-                params=self._params(q=query, site=site, pagesize=limit, sort="relevance"),
+            data = self._get(
+                "/search/advanced", self._params(q=query, site=site, pagesize=limit, sort="relevance")
             )
-            resp.raise_for_status()
-            items = resp.json().get("items", [])
+            items = data.get("items", [])
         except Exception as e:
             print(f"Warning: Stack Exchange search failed for {site}: {e}")
             return []
@@ -103,14 +120,11 @@ class StackExchangeProvider:
         """
         cb = self._content_budget
         try:
-            resp = self._client.get(
+            data = self._get(
                 f"/questions/{question_id}/answers",
-                params=self._params(
-                    site=site, pagesize=cb.max_comments_per_thread, order="desc", sort="votes"
-                ),
+                self._params(site=site, pagesize=cb.max_comments_per_thread, order="desc", sort="votes"),
             )
-            resp.raise_for_status()
-            items = resp.json().get("items", [])
+            items = data.get("items", [])
         except Exception as e:
             print(f"Warning: Stack Exchange answers fetch failed for {question_id}: {e}")
             return []
