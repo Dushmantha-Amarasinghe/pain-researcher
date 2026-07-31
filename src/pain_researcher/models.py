@@ -31,6 +31,7 @@ class Platform(str, Enum):
     REDDIT = "reddit"
     HACKERNEWS = "hackernews"
     STACKEXCHANGE = "stackexchange"
+    WEBSEARCH = "websearch"
 
 
 class Comment(BaseModel):
