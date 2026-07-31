@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from pain_researcher.config import ContentBudgetConfig, Credentials, DiscoveryConfig
-from pain_researcher.models import RedditComment, RedditThread
+from pain_researcher.models import Comment, Platform, Thread
 
 
 def clean_subreddit_name(name: str) -> str:
@@ -100,7 +100,7 @@ class RedditProvider:
         subreddit_name: str,
         limit: Optional[int] = None,
         time_filter: str = "year",
-    ) -> list[RedditThread]:
+    ) -> list[Thread]:
         """Pull top threads (by score) from a verified subreddit."""
         limit = limit or self._content_budget.max_threads_per_subreddit
         sub = self._reddit.subreddit(clean_subreddit_name(subreddit_name))
@@ -108,7 +108,7 @@ class RedditProvider:
 
     def search_threads(
         self, query: str, subreddit_name: Optional[str] = None, limit: int = 25
-    ) -> list[RedditThread]:
+    ) -> list[Thread]:
         """Search for more instances of a pain point — used by the
         corroborate step to count distinct authors beyond the initially
         harvested thread set, and optionally scoped site-wide via r/all.
@@ -120,7 +120,7 @@ class RedditProvider:
             self._to_thread(s) for s in target.search(query, limit=limit, sort="relevance")
         ]
 
-    def _to_thread(self, submission: Any) -> RedditThread:
+    def _to_thread(self, submission: Any) -> Thread:
         cb = self._content_budget
         try:
             submission.comment_sort = "top"
@@ -130,7 +130,7 @@ class RedditProvider:
             top_comments = []
 
         comments = [
-            RedditComment(
+            Comment(
                 id=c.id,
                 author=str(c.author) if c.author else None,
                 body=(c.body or "")[: cb.max_chars_per_comment],
@@ -142,11 +142,12 @@ class RedditProvider:
             if getattr(c, "body", None)
         ]
 
-        return RedditThread(
+        return Thread(
             id=submission.id,
-            subreddit=str(submission.subreddit),
+            platform=Platform.REDDIT,
+            community=str(submission.subreddit),
             title=submission.title,
-            selftext=(submission.selftext or "")[: cb.max_chars_per_source],
+            body=(submission.selftext or "")[: cb.max_chars_per_source],
             author=str(submission.author) if submission.author else None,
             score=submission.score or 0,
             num_comments=submission.num_comments or 0,

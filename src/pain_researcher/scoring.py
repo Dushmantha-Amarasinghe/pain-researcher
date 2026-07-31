@@ -36,15 +36,15 @@ def score_candidate(
     Evidence-volume terms (authors/threads/spread/engagement) use
     log1p — more corroboration should always help, but a candidate with
     200 mentions shouldn't automatically crush one with 15 strong,
-    well-judged mentions just because it's from a bigger subreddit.
+    well-judged mentions just because it's from a bigger community.
     """
     breakdown: dict[str, float] = {
         "distinct_authors": scoring.weight_distinct_authors
         * math.log1p(len(candidate.distinct_authors)),
         "distinct_threads": scoring.weight_distinct_threads
         * math.log1p(len(candidate.distinct_threads)),
-        "subreddit_spread": scoring.weight_subreddit_spread
-        * math.log1p(len(candidate.subreddits)),
+        "community_spread": scoring.weight_community_spread
+        * math.log1p(len(candidate.communities)),
         "engagement": scoring.weight_engagement
         * math.log1p(max(0, candidate.total_engagement)),
     }

@@ -42,7 +42,7 @@ def export_csv(pitches: list[ScoredPitch], output: OutputConfig, run_id: str) ->
         "score",
         "distinct_authors",
         "distinct_threads",
-        "subreddits",
+        "communities",
         "severity",
         "willingness_to_pay",
         "solution_gap",
@@ -63,7 +63,7 @@ def export_csv(pitches: list[ScoredPitch], output: OutputConfig, run_id: str) ->
                     "score": round(p.score, 2),
                     "distinct_authors": len(p.candidate.distinct_authors),
                     "distinct_threads": len(p.candidate.distinct_threads),
-                    "subreddits": ", ".join(sorted(p.candidate.subreddits)),
+                    "communities": ", ".join(sorted(p.candidate.communities)),
                     "severity": js.severity if js else "",
                     "willingness_to_pay": js.willingness_to_pay if js else "",
                     "solution_gap": js.solution_gap.value if js else "",
@@ -87,11 +87,12 @@ def _brief_markdown(pitch: ScoredPitch) -> str:
         c.description,
         "",
         f"## Evidence ({len(c.distinct_authors)} distinct people, "
-        f"{len(c.distinct_threads)} threads, subreddits: {', '.join(sorted(c.subreddits))})",
+        f"{len(c.distinct_threads)} threads, communities: {', '.join(sorted(c.communities))})",
     ]
     for e in c.evidence[:15]:
         lines.append(
-            f'- "{e.excerpt}" — u/{e.author or "unknown"}, {e.score} pts ([source]({e.permalink}))'
+            f'- "{e.excerpt}" — {e.author or "unknown"} on {e.platform.value}/{e.community}, '
+            f"{e.score} pts ([source]({e.permalink}))"
         )
 
     lines += ["", "## Judge Assessment"]
