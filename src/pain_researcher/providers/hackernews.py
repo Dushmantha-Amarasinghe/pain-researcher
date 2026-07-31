@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from typing import Any, Optional
 
 import httpx
@@ -50,20 +51,38 @@ class HackerNewsProvider:
         hits = self._search(tags="ask_hn", limit=limit)
         return [self._to_thread(h) for h in hits]
 
-    def search(self, query: str, limit: int = 25) -> list[Thread]:
-        """Full-text search across stories — used by the corroborate step
-        to find more instances of a candidate pain point.
+    def search(
+        self, query: str, limit: int = 25, max_age_days: Optional[float] = None
+    ) -> list[Thread]:
+        """Full-text search across stories.
+
+        `max_age_days`, when given, bounds Algolia's relevance ranking to
+        posts newer than that — plain relevance search over a generic
+        phrase like "is there a tool" systematically surfaces HN's
+        best-known posts from its full 15+ year history (confirmed live:
+        every unbounded hit came back 3-17 years old), while the
+        date-sorted endpoint swings the other way to posts too new to
+        have any engagement yet. Bounding relevance search by recency
+        gets both: established engagement, within a window still worth
+        acting on. Left unbounded for the corroborate step, where an
+        older mention is still valid corroborating evidence.
         """
-        hits = self._search(query=query, tags="story", limit=limit)
+        hits = self._search(query=query, tags="story", limit=limit, max_age_days=max_age_days)
         return [self._to_thread(h) for h in hits]
 
     def _search(
-        self, query: str = "", tags: str = "story", limit: int = 25
+        self,
+        query: str = "",
+        tags: str = "story",
+        limit: int = 25,
+        max_age_days: Optional[float] = None,
     ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"query": query, "tags": tags, "hitsPerPage": limit}
+        if max_age_days is not None:
+            cutoff = int(time.time() - max_age_days * 86400)
+            params["numericFilters"] = f"created_at_i>{cutoff}"
         try:
-            resp = self._client.get(
-                "/search", params={"query": query, "tags": tags, "hitsPerPage": limit}
-            )
+            resp = self._client.get("/search", params=params)
             resp.raise_for_status()
             return resp.json().get("hits", [])
         except Exception as e:
