@@ -67,6 +67,19 @@ sources:
   harvest_queries: ["is there a tool", "recommend a tool", "so frustrating", "any recommendations for"]
   max_results_per_query: 15
 
+# General web search + crawl — reaches sites with no API at all (Indie
+# Hackers, niche blogs, review sites). Opt in by adding "websearch" to
+# sources.enabled above; not on by default since it's the slowest,
+# heaviest-quota source (a real browser page load per result, per cycle)
+# and has no real engagement metric behind its evidence (see
+# scoring.websearch_trust_discount below).
+web_search:
+  max_cycles: 8              # search -> crawl -> reflect -> next-query, repeated this many times
+  pages_per_search: 5        # pages crawled per cycle; 8 cycles x 5 = up to 40 page loads per run
+  max_chars_per_page: 3000
+  decision_role: judge      # "what to search next" is real judgment -> stronger model by default
+  fallback_seed_query: null # used only if no niche is available (e.g. watchlist mode with no niche)
+
 content_budget:
   max_threads_per_subreddit: 25
   max_comments_per_thread: 15
@@ -132,6 +145,10 @@ scoring:
   weight_buildability: 1.5
   penalty_strong_competitor: -3.0
   penalty_hard_blocker: -5.0
+  # Scales down a candidate's score by this much (as a fraction, 0-1) when
+  # ALL its evidence is websearch-sourced; less when only some of it is.
+  # Websearch evidence has no real upvote/comment count behind it.
+  websearch_trust_discount: 0.3
 
 retry:
   backoff_base_seconds: 2.0

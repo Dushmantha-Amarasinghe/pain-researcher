@@ -106,7 +106,7 @@ class SourcesConfig(BaseModel):
     its own — simpler to reason about, and easy to extend later.
     """
 
-    enabled: list[Literal["reddit", "hackernews", "stackexchange"]] = Field(
+    enabled: list[Literal["reddit", "hackernews", "stackexchange", "websearch"]] = Field(
         default_factory=lambda: ["reddit", "hackernews", "stackexchange"]
     )
     # Queries used to harvest hackernews/stackexchange (reddit doesn't need
@@ -117,6 +117,29 @@ class SourcesConfig(BaseModel):
     harvest_queries: list[str] = Field(default_factory=list)
     max_results_per_query: int = Field(default=6, gt=0)
     stackexchange_sites: list[str] = Field(default_factory=list)
+
+
+class WebSearchConfig(BaseModel):
+    """Iterative general web search + crawl — the fourth source, and a
+    different shape from the other three: instead of hitting a known
+    structured API, it searches the open web, crawls whatever pages come
+    back, and uses an LLM to decide what to search for next based on
+    what it's found so far. This is what reaches content with no API at
+    all (Indie Hackers, niche blogs, review sites) — but has no real
+    engagement metrics to validate against, so it's deliberately
+    lower-weighted in scoring (see ScoringConfig.websearch_trust_discount).
+    """
+
+    max_cycles: int = Field(default=8, gt=0)
+    pages_per_search: int = Field(default=5, gt=0)
+    max_chars_per_page: int = Field(default=3000, gt=0)
+    # Which model role makes the "what should I search next" decision —
+    # this is real judgment (assessing evidence quality, spotting gaps),
+    # not bulk extraction, so it defaults to the stronger model.
+    decision_role: Literal["cheap", "judge"] = "judge"
+    # Used as the cycle-1 query when no niche context is available from
+    # discovery (e.g. watchlist mode, which has no niche concept at all).
+    fallback_seed_query: Optional[str] = None
 
 
 class ContentBudgetConfig(BaseModel):
@@ -156,6 +179,11 @@ class ScoringConfig(BaseModel):
     weight_buildability: float
     penalty_strong_competitor: float
     penalty_hard_blocker: float
+    # 0.0 = no discount, 1.0 = zero score if evidence is entirely
+    # websearch-sourced. Scales with the fraction of a candidate's
+    # evidence that came from websearch rather than a structured API,
+    # since websearch evidence has no real engagement metric behind it.
+    websearch_trust_discount: float = Field(default=0.3, ge=0, le=1)
 
 
 class RetryConfig(BaseModel):
@@ -186,6 +214,7 @@ class PainResearcherSettings(BaseModel):
     roles: RolesConfig
     discovery: DiscoveryConfig
     sources: SourcesConfig
+    web_search: WebSearchConfig
     content_budget: ContentBudgetConfig
     prefilter: PrefilterConfig
     candidate_gating: CandidateGatingConfig
