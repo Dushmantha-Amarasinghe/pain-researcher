@@ -12,4 +12,4 @@ __pycache__/
 # Pain-point researcher generated artifacts
 research_output/
 .pain_researcher_quota/
-pain_researcher_checkpoints.sqlite
+pain_researcher_checkpoints.sqlite*
