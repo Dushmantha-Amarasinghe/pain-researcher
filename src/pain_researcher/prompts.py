@@ -131,7 +131,7 @@ CLUSTERING_PROMPT = """These pain points were extracted independently from diffe
 # Judge (role: judge) — the only LLM step that runs on 31B
 # --------------------------------------------------------------------------
 
-JUDGE_PROMPT = """You are evaluating whether a Reddit-sourced pain point is a real, worthwhile software business opportunity. Emit signals for scoring — do not compute an overall score yourself, a separate deterministic step does that from your signals.
+JUDGE_PROMPT = """You are evaluating whether a pain point is a real, worthwhile software business opportunity. Emit signals for scoring — do not compute an overall score yourself, a separate deterministic step does that from your signals.
 
 <PAIN POINT>
 {title}
@@ -165,3 +165,48 @@ JUDGE_PROMPT = """You are evaluating whether a Reddit-sourced pain point is a re
   "reasoning": "1-2 sentence justification"
 }}
 </FORMAT>"""
+
+
+# --------------------------------------------------------------------------
+# Web research (role: configurable via web_search.decision_role, default
+# judge) — the iterative search -> crawl -> reflect -> next-query loop.
+# This is the only source with no structured API, so the "what should I
+# search next" decision is real judgment, not bulk extraction — the
+# persona below is deliberately explicit about that, per instruction that
+# this decision-maker should behave like an actual analyst, not a
+# generic assistant filling in a template.
+# --------------------------------------------------------------------------
+
+WEB_RESEARCH_PERSONA = """You are a meticulous, skeptical research analyst. You do not accept things at face value: you weigh evidence, distinguish a genuine recurring problem from a one-off complaint or marketing copy, and think several steps ahead about where else proof of a real pattern might exist. You would rather conclude "not enough evidence yet" than overstate a weak finding."""
+
+WEB_RESEARCH_REFLECTION_PROMPT = (
+    WEB_RESEARCH_PERSONA
+    + """
+
+You are researching real, recurring, monetizable problems in this niche:
+
+<NICHE>
+{niche}
+</NICHE>
+
+<SEARCHES ALREADY RUN>
+{past_queries}
+</SEARCHES ALREADY RUN>
+
+<FOUND SO FAR>
+{findings_digest}
+</FOUND SO FAR>
+
+<GOAL>
+1. Assess what's been found so far: does it point toward a specific, recurring pain point described in similar terms across multiple sources, or is it thin, generic, or off-topic?
+2. Identify the single most valuable gap in your current understanding — what would a careful analyst check next to confirm or rule out a real, recurring pattern?
+3. Write ONE concrete, specific search query that closes that gap. It must be meaningfully different from every query already run above — do not repeat or lightly rephrase one of them.
+</GOAL>
+
+<FORMAT>
+{{
+  "gap_analysis": "what's missing, unconfirmed, or worth checking next, in your own words",
+  "next_query": "the specific search query to run next"
+}}
+</FORMAT>"""
+)
