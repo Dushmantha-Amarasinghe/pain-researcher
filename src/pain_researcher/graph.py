@@ -20,7 +20,10 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional
@@ -119,6 +122,26 @@ def _build_providers(settings_path: str) -> Providers:
 
 def get_providers(options: RunOptions) -> Providers:
     return _build_providers(options.settings_path or "")
+
+
+def _run_with_timeout(fn, timeout_s: float, default):
+    """Bound an external call that has no reliable timeout of its own.
+
+    Confirmed live: `competitor_scan`'s DuckDuckGo search + Crawl4AI
+    browser launch hung the entire pipeline indefinitely with neither
+    call bounded. `future.result(timeout=...)` stops *waiting* on a
+    genuinely stuck call rather than killing the underlying thread — an
+    acceptable tradeoff here, since the goal is keeping the node from
+    freezing the whole run, not guaranteeing the stray thread stops.
+    """
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn)
+        try:
+            return future.result(timeout=timeout_s)
+        except FutureTimeoutError:
+            return default
+        except Exception:
+            return default
 
 
 # --------------------------------------------------------------------------
@@ -316,28 +339,70 @@ def harvest_threads(state: ResearchState, config: RunnableConfig) -> dict:
     prefilter = Prefilter(settings.prefilter)
 
     all_threads: list[Thread] = []
+    # Each per-source call is individually timeout-bounded, not just via
+    # the http client's own timeout setting — confirmed live that a
+    # library-level timeout can fail to fire on some networks (proxy/AV
+    # SSL interception holding a connection open), so a hard
+    # thread-based bound is the only reliable guarantee here.
 
     if providers.reddit is not None:
+        print(f"[harvest] reddit: fetching from {len(state.target_subreddits)} subreddit(s)...")
         for sub in state.target_subreddits:
-            try:
-                all_threads.extend(providers.reddit.fetch_threads(sub))
-            except Exception:
-                continue  # one bad subreddit shouldn't abort harvesting the rest
+            found = _run_with_timeout(
+                lambda sub=sub: providers.reddit.fetch_threads(sub), timeout_s=30, default=[]
+            )
+            print(f"[harvest] reddit r/{sub}: {len(found)} threads")
+            all_threads.extend(found)
+
+    queries = settings.sources.harvest_queries
+    query_limit = settings.sources.max_results_per_query
 
     if providers.hackernews is not None:
-        try:
-            all_threads.extend(providers.hackernews.fetch_ask_hn())
-        except Exception:
-            pass  # HN being briefly unreachable shouldn't abort the whole harvest
+        if queries:
+            for q in queries:
+                print(f"[harvest] hackernews: searching {q!r}...")
+                found = _run_with_timeout(
+                    lambda q=q: providers.hackernews.search(
+                        q, limit=query_limit, max_age_days=settings.prefilter.max_age_days
+                    ),
+                    timeout_s=60,
+                    default=[],
+                )
+                print(f"[harvest] hackernews {q!r}: {len(found)} threads")
+                all_threads.extend(found)
+        else:
+            print("[harvest] hackernews: fetching Ask HN...")
+            found = _run_with_timeout(providers.hackernews.fetch_ask_hn, timeout_s=60, default=[])
+            print(f"[harvest] hackernews ask_hn: {len(found)} threads")
+            all_threads.extend(found)
 
     if providers.stackexchange is not None:
         for site in settings.sources.stackexchange_sites:
-            try:
-                all_threads.extend(providers.stackexchange.fetch_questions(site))
-            except Exception:
-                continue  # one bad site shouldn't abort harvesting the rest
+            if queries:
+                for q in queries:
+                    print(f"[harvest] stackexchange/{site}: searching {q!r}...")
+                    found = _run_with_timeout(
+                        lambda q=q, site=site: providers.stackexchange.search(
+                            q, site=site, limit=query_limit
+                        ),
+                        timeout_s=60,
+                        default=[],
+                    )
+                    print(f"[harvest] stackexchange/{site} {q!r}: {len(found)} threads")
+                    all_threads.extend(found)
+            else:
+                print(f"[harvest] stackexchange/{site}: fetching questions...")
+                found = _run_with_timeout(
+                    lambda site=site: providers.stackexchange.fetch_questions(site),
+                    timeout_s=60,
+                    default=[],
+                )
+                print(f"[harvest] stackexchange/{site}: {len(found)} threads")
+                all_threads.extend(found)
 
-    return {"threads": prefilter.filter_threads(all_threads)}
+    kept = prefilter.filter_threads(all_threads)
+    print(f"[harvest] total harvested: {len(all_threads)}, survived prefilter: {len(kept)}")
+    return {"threads": kept}
 
 
 def extract_pain_points(state: ResearchState, config: RunnableConfig) -> dict:
@@ -350,8 +415,10 @@ def extract_pain_points(state: ResearchState, config: RunnableConfig) -> dict:
 
     usage: list[UsageRecord] = []
     raw_candidates: list[PainPointCandidate] = []
+    num_batches = -(-len(state.threads) // batch_size) if state.threads else 0
+    print(f"[extract] {len(state.threads)} threads in {num_batches} batch(es)...")
 
-    for i in range(0, len(state.threads), batch_size):
+    for batch_num, i in enumerate(range(0, len(state.threads), batch_size), start=1):
         batch = state.threads[i : i + batch_size]
         digest, evidence_index = _digest_threads(batch)
         prompt = EXTRACTION_PROMPT.format(threads_digest=digest)
@@ -362,10 +429,12 @@ def extract_pain_points(state: ResearchState, config: RunnableConfig) -> dict:
                 usage.append(result.usage)
                 continue
             result = providers.llm.generate_structured("cheap", "extract_pain_points", "", prompt)
-        except (LLMParseError, ContentTooLargeError):
+        except (LLMParseError, ContentTooLargeError) as e:
+            print(f"[extract] batch {batch_num}/{num_batches} skipped: {e}")
             continue
         usage.append(result.usage)
 
+        found_this_batch = 0
         for pp in result.data.get("pain_points", []):
             refs = pp.get("evidence_refs", [])
             evidence = [evidence_index[r] for r in refs if r in evidence_index]
@@ -378,7 +447,10 @@ def extract_pain_points(state: ResearchState, config: RunnableConfig) -> dict:
                     evidence=evidence,
                 )
             )
+            found_this_batch += 1
+        print(f"[extract] batch {batch_num}/{num_batches}: {found_this_batch} pain point(s) found")
 
+    print(f"[extract] done: {len(raw_candidates)} raw candidate(s) total")
     return {"raw_candidates": raw_candidates, "usage_log": usage}
 
 
@@ -390,13 +462,16 @@ def cluster_pain_points(state: ResearchState, config: RunnableConfig) -> dict:
     dry_run = state.dry_run or options.dry_run
 
     if not state.raw_candidates:
+        print("[cluster] no raw candidates to cluster, skipping")
         return {"candidates": []}
 
     batch_size = settings.content_budget.max_threads_per_extraction_call * 2
     usage: list[UsageRecord] = []
     merged: list[PainPointCandidate] = []
+    num_batches = -(-len(state.raw_candidates) // batch_size)
+    print(f"[cluster] {len(state.raw_candidates)} raw candidate(s) in {num_batches} batch(es)...")
 
-    for i in range(0, len(state.raw_candidates), batch_size):
+    for batch_num, i in enumerate(range(0, len(state.raw_candidates), batch_size), start=1):
         batch = state.raw_candidates[i : i + batch_size]
         digest, index = _digest_candidates(batch)
         prompt = CLUSTERING_PROMPT.format(candidates_digest=digest)
@@ -407,7 +482,8 @@ def cluster_pain_points(state: ResearchState, config: RunnableConfig) -> dict:
                 usage.append(result.usage)
                 continue
             result = providers.llm.generate_structured("cheap", "cluster_pain_points", "", prompt)
-        except (LLMParseError, ContentTooLargeError):
+        except (LLMParseError, ContentTooLargeError) as e:
+            print(f"[cluster] batch {batch_num}/{num_batches} failed, keeping unclustered: {e}")
             merged.extend(batch)  # keep them unclustered rather than losing them
             continue
         usage.append(result.usage)
@@ -430,7 +506,9 @@ def cluster_pain_points(state: ResearchState, config: RunnableConfig) -> dict:
         for ref, cand in index.items():
             if ref not in grouped_refs:
                 merged.append(cand)  # model didn't group it: keep it standalone
+        print(f"[cluster] batch {batch_num}/{num_batches}: {len(merged)} candidate(s) so far")
 
+    print(f"[cluster] done: {len(merged)} candidate(s) after merging")
     return {"candidates": merged, "usage_log": usage}
 
 
@@ -440,7 +518,13 @@ def prefilter_candidates(state: ResearchState, config: RunnableConfig) -> dict:
     """
     options = RunOptions.from_runnable_config(config)
     settings = get_settings(options.settings_path)
-    return {"candidates": gate_candidates(state.candidates, settings.candidate_gating)}
+    gated = gate_candidates(state.candidates, settings.candidate_gating)
+    print(
+        f"[gate] {len(state.candidates)} candidate(s) in, {len(gated)} passed the evidence floor "
+        f"(min {settings.candidate_gating.min_distinct_authors} authors / "
+        f"{settings.candidate_gating.min_distinct_threads} threads)"
+    )
+    return {"candidates": gated}
 
 
 def fan_out_to_validation(state: ResearchState, config: RunnableConfig):
@@ -451,7 +535,9 @@ def fan_out_to_validation(state: ResearchState, config: RunnableConfig):
     instead of hanging on zero fan-out targets.
     """
     if not state.candidates:
+        print("[validate] no candidates cleared gating, nothing to validate")
         return ["score_and_rank"]
+    print(f"[validate] validating {len(state.candidates)} candidate(s)...")
     return [
         Send("validate_candidate", {"candidate": c, "dry_run": state.dry_run})
         for c in state.candidates
@@ -459,7 +545,9 @@ def fan_out_to_validation(state: ResearchState, config: RunnableConfig):
 
 
 def score_and_rank(state: ResearchState, config: RunnableConfig) -> dict:
-    return {"ranked_pitches": rank_pitches(list(state.scored_pitches))}
+    ranked = rank_pitches(list(state.scored_pitches))
+    print(f"[rank] {len(ranked)} candidate(s) scored and ranked")
+    return {"ranked_pitches": ranked}
 
 
 def export_results(state: ResearchState, config: RunnableConfig) -> dict:
@@ -504,24 +592,48 @@ def corroborate(state: CandidateValidationState, config: RunnableConfig) -> dict
     providers = get_providers(options)
     prefilter = Prefilter(settings.prefilter)
     candidate = state.candidate
-    limit = settings.content_budget.max_threads_per_subreddit
+    print(f"[corroborate] {candidate.title!r}...")
+    # Deliberately smaller than the harvest limit — each hit here costs a
+    # further sequential comment-tree fetch per source (confirmed live:
+    # `max_threads_per_subreddit`'s 25 here meant up to 25 sequential
+    # HTTP round-trips just to corroborate one candidate). This step only
+    # needs a handful of corroborating hits, not bulk harvesting depth.
+    limit = settings.sources.max_results_per_query
 
     extra_threads: list[Thread] = []
     if providers.reddit is not None:
         try:
-            extra_threads.extend(providers.reddit.search_threads(candidate.title, limit=limit))
+            extra_threads.extend(
+                _run_with_timeout(
+                    lambda: providers.reddit.search_threads(candidate.title, limit=limit),
+                    timeout_s=30,
+                    default=[],
+                )
+            )
         except Exception:
             pass
     if providers.hackernews is not None:
         try:
-            extra_threads.extend(providers.hackernews.search(candidate.title, limit=limit))
+            extra_threads.extend(
+                _run_with_timeout(
+                    lambda: providers.hackernews.search(candidate.title, limit=limit),
+                    timeout_s=30,
+                    default=[],
+                )
+            )
         except Exception:
             pass
     if providers.stackexchange is not None:
         for site in settings.sources.stackexchange_sites:
             try:
                 extra_threads.extend(
-                    providers.stackexchange.search(candidate.title, site=site, limit=limit)
+                    _run_with_timeout(
+                        lambda site=site: providers.stackexchange.search(
+                            candidate.title, site=site, limit=limit
+                        ),
+                        timeout_s=30,
+                        default=[],
+                    )
                 )
             except Exception:
                 continue
@@ -561,6 +673,7 @@ def corroborate(state: CandidateValidationState, config: RunnableConfig) -> dict
                     )
                 )
 
+    print(f"[corroborate] {candidate.title!r}: +{len(new_evidence)} evidence item(s)")
     return {"candidate": candidate.model_copy(update={"evidence": candidate.evidence + new_evidence})}
 
 
@@ -571,29 +684,33 @@ def competitor_scan(state: CandidateValidationState, config: RunnableConfig) -> 
     if state.dry_run:
         return {}
 
+    print(f"[competitor_scan] {state.candidate.title!r}...")
+
     options = RunOptions.from_runnable_config(config)
     settings = get_settings(options.settings_path)
     providers = get_providers(options)
     prefilter = Prefilter(settings.prefilter)
 
     query = f"{state.candidate.title} tool app software"
-    try:
-        search_results = duckduckgo_search(
+    search_results = _run_with_timeout(
+        lambda: duckduckgo_search(
             query, max_results=settings.content_budget.max_competitor_pages, fetch_full_page=False
-        )
-        urls = [r["url"] for r in search_results.get("results", []) if r.get("url")]
-    except Exception:
-        urls = []
+        ),
+        timeout_s=20,
+        default={"results": []},
+    )
+    urls = [r["url"] for r in search_results.get("results", []) if r.get("url")]
 
-    try:
-        pages = providers.crawl.fetch_pages(urls) if urls else []
-    except Exception as e:
-        # Crawl4AI's browser (playwright) not installed yet, a page timing
-        # out, or an anti-bot wall are all real possibilities on any given
-        # candidate — one of them shouldn't crash that candidate's whole
-        # validation branch when everything else here degrades gracefully.
-        print(f"Warning: competitor page crawl failed: {e}")
-        pages = []
+    # Crawl4AI's browser (playwright) not installed, a hung page load, or
+    # an anti-bot wall are all real possibilities on any given candidate —
+    # bounded so one of them can't freeze the whole validation branch (or,
+    # confirmed live, the whole pipeline) when everything else here
+    # degrades gracefully already.
+    pages = (
+        _run_with_timeout(lambda: providers.crawl.fetch_pages(urls), timeout_s=45, default=[])
+        if urls
+        else []
+    )
 
     evidence_text = " ".join(e.excerpt for e in state.candidate.evidence).lower()
     competitors: list[Competitor] = []
@@ -612,6 +729,7 @@ def competitor_scan(state: CandidateValidationState, config: RunnableConfig) -> 
             )
         )
 
+    print(f"[competitor_scan] {state.candidate.title!r}: {len(competitors)} competitor(s) found")
     return {"competitors": competitors}
 
 
@@ -624,6 +742,7 @@ def judge(state: CandidateValidationState, config: RunnableConfig) -> dict:
     settings = get_settings(options.settings_path)
     providers = get_providers(options)
     candidate = state.candidate
+    print(f"[judge] {candidate.title!r}...")
 
     evidence_digest = "\n".join(
         f'- ({e.author or "unknown"} on {e.platform.value}/{e.community}, {e.score} pts): "{e.excerpt}"'
@@ -652,12 +771,13 @@ def judge(state: CandidateValidationState, config: RunnableConfig) -> dict:
         result = providers.llm.generate_structured("judge", "judge", "", prompt)
         usage.append(result.usage)
         judge_signals = JudgeSignals(**result.data)
-    except Exception:
+    except Exception as e:
         # Keep the candidate in the output (unjudged, scored on evidence
         # alone) rather than dropping it for a single bad LLM response.
-        pass
+        print(f"[judge] {candidate.title!r}: judging failed, scoring on evidence alone: {e}")
 
     pitch = build_scored_pitch(candidate, state.competitors, judge_signals, settings.scoring)
+    print(f"[judge] {candidate.title!r}: score={pitch.score:.2f}")
     return {"scored_pitches": [pitch], "usage_log": usage}
 
 
@@ -726,6 +846,10 @@ def run_with_checkpoint(
     PAIN_RESEARCHER_THREAD_ID to continue a specific prior run, or leave
     it as the default to always resume "the" default run.
     """
+    import sqlite3
+    from contextlib import closing
+
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
     from langgraph.checkpoint.sqlite import SqliteSaver
 
     options = RunOptions.from_runnable_config(config)
@@ -738,10 +862,46 @@ def run_with_checkpoint(
     )
     run_config["configurable"] = configurable
 
-    with SqliteSaver.from_conn_string(settings.checkpoint.db_path) as checkpointer:
+    # Registers our custom Pydantic/dataclass types with the checkpoint
+    # serializer explicitly — confirmed live: without this, every one
+    # prints a "will be blocked in a future version" deserialization
+    # warning on every resumed run, and would eventually break outright.
+    serde = JsonPlusSerializer(
+        allowed_msgpack_modules=[
+            ("pain_researcher.models", "Platform"),
+            ("pain_researcher.models", "Thread"),
+            ("pain_researcher.models", "Comment"),
+            ("pain_researcher.models", "ContentKind"),
+            ("pain_researcher.models", "Evidence"),
+            ("pain_researcher.models", "PainPointCandidate"),
+            ("pain_researcher.models", "Competitor"),
+            ("pain_researcher.models", "CompetitorStrength"),
+            ("pain_researcher.models", "SolutionGap"),
+            ("pain_researcher.models", "JudgeSignals"),
+            ("pain_researcher.models", "ScoredPitch"),
+            ("pain_researcher.state", "UsageRecord"),
+        ]
+    )
+    with closing(sqlite3.connect(settings.checkpoint.db_path, check_same_thread=False)) as conn:
+        checkpointer = SqliteSaver(conn, serde=serde)
         return build_graph(checkpointer=checkpointer).invoke(initial_state, config=run_config)
 
 
 if __name__ == "__main__":
+    # Only needed here: `langgraph dev` auto-loads .env itself via
+    # langgraph.json's "env" pointer, but a plain `python -m
+    # pain_researcher.graph` invocation has no such wrapper around it.
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    # Python fully buffers stdout when it isn't a live terminal (piped,
+    # redirected to a file, or run under some IDE/CI runners) — confirmed
+    # while testing this exact script, where progress prints didn't
+    # appear until the process exited. Forcing line-buffering means the
+    # `[harvest]`/`[extract]`/etc. progress lines show up as they happen
+    # regardless of how this is run, not just in an interactive terminal.
+    sys.stdout.reconfigure(line_buffering=True)
+
     result = run_with_checkpoint(ResearchStateInput())
     print(f"Run complete: {len(result.get('ranked_pitches', []))} ranked pitches.")
