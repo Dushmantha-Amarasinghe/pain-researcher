@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -327,6 +328,21 @@ def select_targets(state: ResearchState, config: RunnableConfig) -> dict:
     return {"niches": niches, "target_subreddits": verified, "usage_log": usage}
 
 
+def _sanitize_search_query(query: str) -> str:
+    """Defensive backstop for the reflection prompt's query-format
+    instruction — confirmed live that `site:` filters and quoted
+    boolean queries reliably return zero results from this search
+    backend, so this strips that syntax even if the model doesn't fully
+    follow the instruction (LLMs don't always comply with format
+    constraints 100% of the time, so the instruction alone isn't enough
+    to rely on for something this consequential to run cost).
+    """
+    query = re.sub(r"site:\S+", " ", query, flags=re.IGNORECASE)
+    query = re.sub(r"\b(OR|AND|NOT)\b", " ", query)
+    query = query.replace('"', " ").replace("(", " ").replace(")", " ")
+    return re.sub(r"\s+", " ", query).strip()
+
+
 def _run_web_research(niche: str, settings, providers: "Providers") -> tuple[list[Thread], list[UsageRecord]]:
     """Iterative general web search -> crawl -> reflect -> next-query loop.
 
@@ -417,7 +433,7 @@ def _run_web_research(niche: str, settings, providers: "Providers") -> tuple[lis
                 wcfg.decision_role, "web_research_reflect", "", prompt
             )
             usage.append(result.usage)
-            next_query = (result.data.get("next_query") or "").strip()
+            next_query = _sanitize_search_query(result.data.get("next_query") or "")
             print(f"[websearch] cycle {cycle}/{wcfg.max_cycles} gap: {result.data.get('gap_analysis', '')[:150]}")
         except Exception as e:
             print(f"[websearch] reflection failed, broadening query instead: {e}")
