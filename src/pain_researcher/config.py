@@ -109,6 +109,13 @@ class SourcesConfig(BaseModel):
     enabled: list[Literal["reddit", "hackernews", "stackexchange"]] = Field(
         default_factory=lambda: ["reddit", "hackernews", "stackexchange"]
     )
+    # Queries used to harvest hackernews/stackexchange (reddit doesn't need
+    # this — subreddits are already topically pre-filtered communities).
+    # Confirmed live: blind "top by activity/recency" browsing on HN/SE
+    # almost never surfaces complaint-shaped content — search for a
+    # concrete phrase does. Empty list falls back to blind browsing.
+    harvest_queries: list[str] = Field(default_factory=list)
+    max_results_per_query: int = Field(default=6, gt=0)
     stackexchange_sites: list[str] = Field(default_factory=list)
 
 
