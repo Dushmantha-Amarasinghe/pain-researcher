@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+
+# Environment
+.env
+
+# Pain-point researcher generated artifacts
+research_output/
+.pain_researcher_quota/
+pain_researcher_checkpoints.sqlite
