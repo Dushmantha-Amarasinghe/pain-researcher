@@ -385,10 +385,18 @@ def _run_web_research(niche: str, settings, providers: "Providers") -> tuple[lis
         ]
         seen_urls.update(new_urls)
 
+        # Scales with pages_per_search rather than a flat number — a fresh
+        # browser launch plus N sequential page loads (each already
+        # bounded at 20s via CrawlerRunConfig.page_timeout) can
+        # legitimately take longer than a flat 60s once N is more than
+        # 2-3. Confirmed live: a flat 60s cut off a real (not hung) crawl
+        # of 5 pages before it produced anything, including before it
+        # could even log which URLs it was attempting.
+        crawl_timeout = 30 + wcfg.pages_per_search * 25
         pages = (
             _run_with_timeout(
                 lambda u=new_urls: providers.crawl.fetch_pages(u, limit=wcfg.pages_per_search),
-                timeout_s=60,
+                timeout_s=crawl_timeout,
                 default=[],
             )
             if new_urls
