@@ -88,14 +88,29 @@ class CrawlProvider:
                 try:
                     result = await crawler.arun(url=url, config=run_config)
                     if not result or not getattr(result, "success", False):
+                        # Was silently swallowed before — confirmed live
+                        # this made "0 pages crawled" look like nothing
+                        # happened at all, when it was usually an anti-bot
+                        # block or similar on every URL that run.
+                        reason = getattr(result, "error_message", None) or "crawl unsuccessful"
+                        print(f"Warning: crawl skipped for {url}: {reason}")
                         continue
                     markdown = _extract_markdown(result)[:char_cap]
                     metadata = getattr(result, "metadata", None) or {}
                     title = metadata.get("title", "") if isinstance(metadata, dict) else ""
                     if markdown.strip():
                         pages.append(CompetitorPage(url=url, markdown=markdown, title=title))
-                except Exception:
+                    else:
+                        print(f"Warning: crawl skipped for {url}: no extractable content")
+                except Exception as e:
                     # One bad competitor URL (timeout, anti-bot wall, dead
                     # link) shouldn't abort the whole competitor scan.
+                    print(f"Warning: crawl failed for {url}: {e}")
                     continue
+        # Confirmed live on Windows: closing the browser's subprocess
+        # transports needs an extra event-loop tick to finish releasing
+        # OS pipe handles before asyncio.run() tears the loop down —
+        # without this, cleanup finishes after the loop is gone and
+        # raises harmless but noisy ResourceWarning/unclosed-pipe errors.
+        await asyncio.sleep(0.25)
         return pages
