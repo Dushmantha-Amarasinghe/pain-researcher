@@ -21,6 +21,7 @@ from pain_researcher.models import (
     Competitor,
     JudgeSignals,
     PainPointCandidate,
+    Platform,
     ScoredPitch,
     SolutionGap,
 )
@@ -77,7 +78,22 @@ def score_candidate(
         else:
             breakdown["hard_blockers"] = 0.0
 
-    return sum(breakdown.values()), breakdown
+    raw_score = sum(breakdown.values())
+
+    # Websearch-sourced evidence (general search + crawl, no structured
+    # API) has no real engagement metric behind it — no upvotes, no
+    # comment count, usually no identifiable author — so it's scaled down
+    # in proportion to how much of a candidate's evidence relies on it.
+    # A candidate corroborated entirely by Reddit/HN/SE is unaffected.
+    websearch_count = sum(1 for e in candidate.evidence if e.platform == Platform.WEBSEARCH)
+    websearch_fraction = websearch_count / len(candidate.evidence) if candidate.evidence else 0.0
+    if websearch_fraction > 0:
+        discount = scoring.websearch_trust_discount * websearch_fraction
+        final_score = raw_score * (1 - discount)
+        breakdown["websearch_trust_discount"] = final_score - raw_score
+        return final_score, breakdown
+
+    return raw_score, breakdown
 
 
 def build_scored_pitch(
