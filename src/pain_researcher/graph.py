@@ -585,7 +585,15 @@ def competitor_scan(state: CandidateValidationState, config: RunnableConfig) -> 
     except Exception:
         urls = []
 
-    pages = providers.crawl.fetch_pages(urls) if urls else []
+    try:
+        pages = providers.crawl.fetch_pages(urls) if urls else []
+    except Exception as e:
+        # Crawl4AI's browser (playwright) not installed yet, a page timing
+        # out, or an anti-bot wall are all real possibilities on any given
+        # candidate — one of them shouldn't crash that candidate's whole
+        # validation branch when everything else here degrades gracefully.
+        print(f"Warning: competitor page crawl failed: {e}")
+        pages = []
 
     evidence_text = " ".join(e.excerpt for e in state.candidate.evidence).lower()
     competitors: list[Competitor] = []
