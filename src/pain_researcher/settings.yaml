@@ -47,6 +47,17 @@ discovery:
   max_subreddits_total: 20
   min_subreddit_subscribers: 1000     # guards against near-dead/hallucinated subs
 
+sources:
+  # Which content sources are active this run. Reddit can be disabled
+  # here (e.g. while API access is pending approval) without touching
+  # any other config — hackernews and stackexchange need no credentials
+  # at all and work immediately.
+  enabled: ["reddit", "hackernews", "stackexchange"]
+  # Stack Exchange is multi-tenant (~170 sites); pick the ones relevant
+  # to the niches you're researching. Site slugs, not full URLs — e.g.
+  # "money" for money.stackexchange.com, "stackoverflow" for Stack Overflow.
+  stackexchange_sites: ["money", "webmasters", "sysadmin", "superuser", "freelancing"]
+
 content_budget:
   max_threads_per_subreddit: 25
   max_comments_per_thread: 15
@@ -102,7 +113,7 @@ candidate_gating:
 scoring:
   weight_distinct_authors: 3.0
   weight_distinct_threads: 1.5
-  weight_subreddit_spread: 2.0
+  weight_community_spread: 2.0   # rewards a pain point showing up across multiple platforms/communities, not just one
   weight_engagement: 0.5
   weight_severity: 2.0
   weight_wtp_signal: 3.5

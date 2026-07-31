@@ -95,6 +95,23 @@ class DiscoveryConfig(BaseModel):
     min_subreddit_subscribers: int = Field(default=1000, ge=0)
 
 
+class SourcesConfig(BaseModel):
+    """Which data sources are active, and their non-Reddit targets.
+
+    Reddit's targets come from `DiscoveryConfig` (autonomous/seed/
+    watchlist, since subreddit discovery is the complex flow). Hacker
+    News needs no target concept — it's a single Ask HN firehose.
+    Stack Exchange is multi-tenant (~170 sites), so it gets its own
+    fixed site list here rather than an autonomous-discovery flow of
+    its own — simpler to reason about, and easy to extend later.
+    """
+
+    enabled: list[Literal["reddit", "hackernews", "stackexchange"]] = Field(
+        default_factory=lambda: ["reddit", "hackernews", "stackexchange"]
+    )
+    stackexchange_sites: list[str] = Field(default_factory=list)
+
+
 class ContentBudgetConfig(BaseModel):
     max_threads_per_subreddit: int = Field(gt=0)
     max_comments_per_thread: int = Field(gt=0)
@@ -124,7 +141,7 @@ class CandidateGatingConfig(BaseModel):
 class ScoringConfig(BaseModel):
     weight_distinct_authors: float
     weight_distinct_threads: float
-    weight_subreddit_spread: float
+    weight_community_spread: float
     weight_engagement: float
     weight_severity: float
     weight_wtp_signal: float
@@ -161,6 +178,7 @@ class PainResearcherSettings(BaseModel):
     models: dict[str, ModelProfile]
     roles: RolesConfig
     discovery: DiscoveryConfig
+    sources: SourcesConfig
     content_budget: ContentBudgetConfig
     prefilter: PrefilterConfig
     candidate_gating: CandidateGatingConfig
@@ -258,34 +276,38 @@ class RunOptions(BaseModel):
 
 
 class Credentials(BaseModel):
+    """Reddit credentials are optional here, not required — Reddit is one
+    of several toggleable sources (see `SourcesConfig.enabled`), and
+    access to it can be pending approval for reasons entirely outside
+    this system's control. Google is the only always-required credential,
+    since every pipeline run makes LLM calls regardless of which content
+    sources are active. The Reddit-specific check happens where a
+    RedditProvider is actually constructed, only if "reddit" is enabled.
+    """
+
     google_api_key: str
-    reddit_client_id: str
-    reddit_client_secret: str
-    reddit_user_agent: str
+    reddit_client_id: Optional[str] = None
+    reddit_client_secret: Optional[str] = None
+    reddit_user_agent: Optional[str] = None
+    stackexchange_api_key: Optional[str] = None  # optional even when SE is enabled; raises quota if set
 
     @classmethod
     def from_env(cls) -> "Credentials":
-        missing = [
-            name
-            for name, env in [
-                ("GOOGLE_API_KEY", "GOOGLE_API_KEY"),
-                ("REDDIT_CLIENT_ID", "REDDIT_CLIENT_ID"),
-                ("REDDIT_CLIENT_SECRET", "REDDIT_CLIENT_SECRET"),
-                ("REDDIT_USER_AGENT", "REDDIT_USER_AGENT"),
-            ]
-            if not os.environ.get(env)
-        ]
-        if missing:
+        if not os.environ.get("GOOGLE_API_KEY"):
             raise RuntimeError(
-                f"Missing required environment variable(s): {', '.join(missing)}. "
-                "Copy .env.example to .env and fill these in."
+                "Missing required environment variable: GOOGLE_API_KEY. "
+                "Copy .env.example to .env and fill it in."
             )
         return cls(
             google_api_key=os.environ["GOOGLE_API_KEY"],
-            reddit_client_id=os.environ["REDDIT_CLIENT_ID"],
-            reddit_client_secret=os.environ["REDDIT_CLIENT_SECRET"],
-            reddit_user_agent=os.environ["REDDIT_USER_AGENT"],
+            reddit_client_id=os.environ.get("REDDIT_CLIENT_ID"),
+            reddit_client_secret=os.environ.get("REDDIT_CLIENT_SECRET"),
+            reddit_user_agent=os.environ.get("REDDIT_USER_AGENT"),
+            stackexchange_api_key=os.environ.get("STACKEXCHANGE_API_KEY"),
         )
+
+    def has_reddit(self) -> bool:
+        return bool(self.reddit_client_id and self.reddit_client_secret and self.reddit_user_agent)
 
 
 # --------------------------------------------------------------------------
