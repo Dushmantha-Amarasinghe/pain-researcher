@@ -65,10 +65,13 @@ class CrawlProvider:
         # Pruning filter trims boilerplate/nav/footer before markdown-ifying,
         # which matters here: every page we crawl eventually feeds the 31B
         # judge call, and TPM is the binding constraint on that call.
+        # page_timeout set explicitly (confirmed live: a hung crawl here
+        # can freeze the whole pipeline indefinitely with no timeout at all).
         run_config = CrawlerRunConfig(
             markdown_generator=DefaultMarkdownGenerator(
                 content_filter=PruningContentFilter()
-            )
+            ),
+            page_timeout=20000,
         )
 
         pages: list[CompetitorPage] = []
