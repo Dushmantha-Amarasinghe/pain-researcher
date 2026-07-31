@@ -1,0 +1,124 @@
+# Pain-Point Researcher — tunable settings.
+#
+# This file is the single place to retune the system's aggressiveness,
+# swap LLM models, or adjust scoring. No source file should need to change
+# when you want to run tighter/looser than the defaults below, or point
+# "cheap"/"judge" at different models entirely.
+
+models:
+  gemma-4-26b:
+    model_id: gemma-4-26b-a4b-it
+    rpm_limit: 30
+    tpm_limit: 16000
+    rpd_limit: 14400
+    context_window: 128000
+    max_input_tokens_per_call: 1600   # hard cap per call, must stay below tpm_limit
+    safety_margin_pct: 85             # only ever plan to use this % of stated limits
+    target_rpm: 10                    # sustained pacing target, not a burst ceiling
+    supports_tool_calling: false      # flip when the model supports it — no code change
+    supports_system_role: false
+
+  gemma-4-31b:
+    model_id: gemma-4-31b-it
+    rpm_limit: 30
+    tpm_limit: 16000
+    rpd_limit: 14400
+    context_window: 128000
+    max_input_tokens_per_call: 1600
+    safety_margin_pct: 85
+    target_rpm: 8
+    supports_tool_calling: false
+    supports_system_role: false
+
+# Map pipeline roles to entries in `models` above. Retargeting a role to a
+# different model is the only change needed to swap models later.
+roles:
+  cheap: gemma-4-26b   # niche/subreddit proposal, extraction, clustering
+  judge: gemma-4-31b   # validation: severity, WTP, solution-gap, buildability
+
+discovery:
+  # autonomous | seed | watchlist — overridable per-run via env var or
+  # LangGraph Studio config tab (see config.py RunOptions).
+  mode: autonomous
+  seed_niche: null
+  subreddit_watchlist: []
+  max_niches_per_run: 5
+  max_subreddits_per_niche: 6
+  max_subreddits_total: 20
+  min_subreddit_subscribers: 1000     # guards against near-dead/hallucinated subs
+
+content_budget:
+  max_threads_per_subreddit: 25
+  max_comments_per_thread: 15
+  max_chars_per_comment: 600
+  max_threads_per_extraction_call: 5  # threads bundled into one 26B extraction call
+  max_sources_per_call: 3
+  max_chars_per_source: 4000
+  max_competitor_pages: 5
+  max_chars_per_competitor_page: 3000
+
+prefilter:
+  min_upvotes: 5
+  min_comments: 3
+  max_age_days: 730
+  drop_flairs: ["megathread", "meta", "announcement", "mod post"]
+  # Deterministic pre-LLM signal. Tune these constantly as you learn what
+  # actually predicts a real, extractable pain point.
+  complaint_phrases:
+    - "is there a tool"
+    - "is there an app"
+    - "does anyone know a way to"
+    - "so annoying"
+    - "i hate that"
+    - "why is there no"
+    - "why isn't there"
+    - "i wish there was"
+    - "any recommendations for"
+    - "sick of"
+    - "tired of"
+    - "frustrated with"
+    - "workaround for"
+    - "manually"
+    - "spent hours"
+    - "no good solution"
+  wtp_phrases:
+    - "i'd pay for"
+    - "i would pay"
+    - "we currently pay"
+    - "i hired someone"
+    - "i built a spreadsheet"
+    - "take my money"
+    - "shut up and take my money"
+    - "willing to pay"
+    - "paid version"
+    - "worth paying for"
+    - "budget for"
+
+candidate_gating:
+  min_distinct_authors: 3
+  min_distinct_threads: 2
+  max_candidates_to_validate: 15      # biggest single lever on 31B quota spend
+
+scoring:
+  weight_distinct_authors: 3.0
+  weight_distinct_threads: 1.5
+  weight_subreddit_spread: 2.0
+  weight_engagement: 0.5
+  weight_severity: 2.0
+  weight_wtp_signal: 3.5
+  weight_solution_gap: 2.5
+  weight_buildability: 1.5
+  penalty_strong_competitor: -3.0
+  penalty_hard_blocker: -5.0
+
+retry:
+  backoff_base_seconds: 2.0
+  backoff_max_seconds: 60.0
+  max_retries: 5
+
+output:
+  output_dir: research_output
+  top_n_briefs: 10
+
+checkpoint:
+  db_path: pain_researcher_checkpoints.sqlite
